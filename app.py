@@ -38,6 +38,7 @@ import jwt
 from typing import Annotated
 from collections import defaultdict
 from datetime import date, timedelta, timezone, datetime
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -57,6 +58,8 @@ from bin.utilities import parse_score, get_wordle_puzzle, calculate_elo, match_p
 config_file = os.getenv('CONFIG_FILE', 'config.yml')
 with open(config_file, 'r') as f:
     config = yaml.safe_load(f)
+
+tz_eastern = ZoneInfo('America/New_York')
 
 model = PlackettLuce()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -456,7 +459,7 @@ def elo_decay():
     pass
 
 def is_puzzle_valid(puzzle: int):
-    current_puzzle = get_wordle_puzzle(date.today())
+    current_puzzle = get_wordle_puzzle(datetime.now(tz_eastern).date())
     if current_puzzle <= puzzle:
         return True
     else:
@@ -646,7 +649,7 @@ async def backfill_scores(backfill_data: BackfillData, current_user: Annotated[U
     }
 
 @app.get('/score/{uuid}')
-async def get_score(uuid, current_user: Annotated[User, Depends(get_current_active_user)], puzzle: int = get_wordle_puzzle(date.today())):
+async def get_score(uuid, current_user: Annotated[User, Depends(get_current_active_user)], puzzle: int = get_wordle_puzzle(datetime.now(tz_eastern).date())):
     player_data = lookup_player(config, uuid)
 
     if player_data == {}:
@@ -665,12 +668,12 @@ async def get_score(uuid, current_user: Annotated[User, Depends(get_current_acti
         return score_data
 
 @app.get('/blame/{uuid}')
-async def blame_score(uuid, current_user: Annotated[User, Depends(get_current_active_user)], puzzle: int = get_wordle_puzzle(date.today()) - 1):
+async def blame_score(uuid, current_user: Annotated[User, Depends(get_current_active_user)], puzzle: int = get_wordle_puzzle(datetime.now(tz_eastern).date()) - 1):
     msg = blame(uuid, puzzle)
     return {'msg': msg}
 
 @app.get('/calculate-daily/')
-async def calculate_daily(current_user: Annotated[User, Depends(get_current_active_user)], puzzle_date: date = date.today()):
+async def calculate_daily(current_user: Annotated[User, Depends(get_current_active_user)], puzzle_date: date = datetime.now(tz_eastern).date()):
     puzzle = get_wordle_puzzle(puzzle_date)
     if check_players(puzzle, puzzle, True):
         calculate_openskill(puzzle)
@@ -680,7 +683,7 @@ async def calculate_daily(current_user: Annotated[User, Depends(get_current_acti
     return {'status': 200}
 
 @app.get('/daily-ranks/')
-async def daily_ranks(current_user: Annotated[User, Depends(get_current_active_user)], report_date: date = date.today()):
+async def daily_ranks(current_user: Annotated[User, Depends(get_current_active_user)], report_date: date = datetime.now(tz_eastern).date()):
     """
     Provide a ranking of all players based on their performance (rank only, hard mode independent) in a given puzzle
     """
@@ -692,7 +695,7 @@ async def daily_ranks(current_user: Annotated[User, Depends(get_current_active_u
     return output
 
 @app.get('/daily-summary/')
-async def daily_summary(current_user: Annotated[User, Depends(get_current_active_user)], report_date: date = date.today()):
+async def daily_summary(current_user: Annotated[User, Depends(get_current_active_user)], report_date: date = datetime.now(tz_eastern).date()):
     puzzle = get_wordle_puzzle(report_date - timedelta(days=1))
     if check_players(puzzle, puzzle, False):
         data = get_daily_report(report_date)
@@ -701,7 +704,7 @@ async def daily_summary(current_user: Annotated[User, Depends(get_current_active
     return data
 
 @app.get('/weekly-summary/')
-async def weekly_summary(current_user: Annotated[User, Depends(get_current_active_user)], end_date: date = date.today()):
+async def weekly_summary(current_user: Annotated[User, Depends(get_current_active_user)], end_date: date = datetime.now(tz_eastern).date()):
     start_date = end_date - timedelta(days=7)
     end = get_wordle_puzzle(end_date)
     start = get_wordle_puzzle(start_date)
