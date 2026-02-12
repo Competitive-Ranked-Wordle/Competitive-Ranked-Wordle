@@ -602,7 +602,6 @@ async def add_score(score: Score, current_user: Annotated[User, Depends(get_curr
         if is_puzzle_valid(data['puzzle']):
             add_entry(config, data)
             data['player_name'] = player_data['player_name']
-            data['status'] = 200
             return data
         else:
             return {
