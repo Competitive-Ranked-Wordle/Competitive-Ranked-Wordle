@@ -130,6 +130,70 @@ def check_players(start: int, end: int, hard_mode: bool = True):
     else:
         return True
 
+def calculate_formula_one(puzzle: int):
+    """
+    Calculate Formula One rankings for a given day
+
+    The scoring system awards points only to the top 10 players each week, as follows:
+    First: 25 
+    Second: 18
+    Third: 15
+    Fourth: 12
+    Fifth: 10
+    Sixth: 8
+    Seventh: 6
+    Eighth: 4
+    Ninth: 2
+    Tenth: 1
+    """
+    # Points table for the top 10 finishers (index 0 == 1st place)
+    points_table = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1]
+
+    # The submitted puzzle is assumed to be Saturday. The scoring window is the
+    # previous Sunday through the provided Saturday, which is 7 consecutive puzzles.
+    start_puzzle = puzzle - 6
+    end_puzzle = puzzle
+
+    # Pull every entry across the week and group them by player
+    query_params = f"WHERE puzzle >= {start_puzzle} and puzzle <= {end_puzzle} and hard_mode = 1"
+    entries = get_entries(config, query_params)
+
+    player_scores = defaultdict(list)
+    for entry in entries:
+        player_scores[entry['player_id']].append(entry['calculated_score'])
+
+    # For every player who submitted at least one score this week, compute the
+    # average of their top three calculated_score values. If a player submitted
+    # fewer than three, we average whatever is available (this keeps partial
+    # weeks meaningful while still favouring consistent, high-scoring players).
+    player_averages = {}
+    for player_id, scores in player_scores.items():
+        top_three = sorted(scores, reverse=True)[:3]
+        player_averages[player_id] = sum(top_three) / len(top_three)
+
+    # Rank players by highest average first. Ties are broken by player_id order
+    # (a stable, deterministic tie-break given no other configured criteria).
+    ranked_players = sorted(
+        player_averages.items(),
+        key=lambda item: (-item[1], item[0])
+    )
+
+    # Award the configured points to the top 10 finishers, and persist both the
+    # per-week delta (formula_delta) and the running total (formula_points).
+    for position, (player_id, _average) in enumerate(ranked_players):
+        awarded = points_table[position] if position < len(points_table) else 0
+
+        # Read the player's current running total so we can add the awarded points
+        player_data = lookup_player(config, player_id=player_id)
+        current_total = player_data.get('formula_points') or 0
+
+        players_data = {
+            'formula_delta': awarded,
+            'formula_points': current_total + awarded
+        }
+        update_player_entry(config, player_id, players_data)
+
+
 def calculate_openskill(puzzle: int):
     """
     Calculate Openskill rankings for a given day
@@ -324,15 +388,29 @@ def blame(uuid: str, puzzle: int):
     return output_string
 
 def get_daily_ranks(puzzle: int):
-    # query_string = f"SELECT player_name, hard_mode, calculated_score FROM scores WHERE puzzle = {puzzle}"
-    # data = get_entries(query_string)
+    """
+    Provide a ranking of all players in a given puzzle, filtering out players with default stats
+    """
+    # Get all player scores for the given puzzle
     query_params = f"WHERE puzzle = {puzzle}"
     data = get_entries(config, query_params)
+
+    # Add player names to the data
+    processed_data = []
     for result in data:
         result['hard_mode'] = 'Y' if result['hard_mode'] == 1 else 'N'
         player_data = lookup_player(config, player_id=result['player_id'])
+
+        # Filter out players who have default stats
+        if player_data['player_ord'] == 0 and player_data['player_elo'] == 400:
+            continue
         result['player_name'] = player_data['player_name']
-    sorted_players = sorted(data, key=lambda x: x['calculated_score'], reverse=True)
+        processed_data.append(result)
+
+    # Sort players by their score
+    sorted_players = sorted(processed_data, key=lambda x: x['calculated_score'], reverse=True)
+
+    # Create a markdown chart of the rankings
     player_chart = '| Player | Hard Mode | Ranking |\n| --- | --- | --- |'
     i = 0
     last_score = 0
@@ -345,6 +423,7 @@ def get_daily_ranks(puzzle: int):
         player['rank'] = i
         player_chart = f"{player_chart}\n| {player['player_name']} | {player['hard_mode']} | {player['rank']} |"
 
+    # Format the output
     output = {
         'raw_data': sorted_players,
         'md_chart': player_chart,
@@ -355,17 +434,20 @@ def get_daily_report(today: date):
     """
     Provide a ranking of all players in order of their OpenSkill rank
     """
+    # Determine the puzzle number for the previous day (the most recently completed puzzle)
     puzzle = get_wordle_puzzle(today - timedelta(days=1))
     players = defaultdict(list)
     player_stats = {}
     player_data = get_all_players(config)
 
+    # Fetch all entries for the target puzzle and group them by player_id
     query_params = f"WHERE puzzle = {puzzle}"
     entries = get_entries(config, query_params)
     for entry in entries:
         players[entry['player_id']].append(entry)
     
     players = dict(players)
+    # Build per-player stats: end ELO/ordinal and their per-day changes
     for player, scores in players.items():
         player_stats[player] = {}
 
@@ -375,13 +457,22 @@ def get_daily_report(today: date):
 
             player_stats[player]['end_ord'] = round(score['ordinal'], 5)
             player_stats[player]['ord_change'] = round(score['ordinal_delta'], 5)
-    
+
+    # Filter out players whose stats are still at the default values
+    # (ordinal=0 and ELO=400 indicate the player has not yet meaningfully played)
+    player_stats = {
+        player: stats
+        for player, stats in player_stats.items()
+        if not (stats.get('end_ord') == 0 and stats.get('end_elo') == 400)
+    }
+
     # sort player_stats by end ordinal
     sorted_keys = sorted(player_stats, key=lambda k: player_stats[k]['end_ord'], reverse=True)
     raw_sorted_player_stats = {}
     for key in sorted_keys:
         raw_sorted_player_stats[key] = player_stats[key]
 
+    # Replace player_id keys with human-readable player names for the final output
     sorted_player_stats = {}
     for k, v in raw_sorted_player_stats.items():
         player_name = match_player_name(player_data, player_id=k)
@@ -399,6 +490,7 @@ def get_weekly_report(end_date: date):
         - End ELO
         - Average score
     """
+    # Compute the 7-day window and translate the date range into puzzle numbers
     start_date = end_date - timedelta(days=7)
     end = get_wordle_puzzle(end_date)
     start = get_wordle_puzzle(start_date)
@@ -406,6 +498,7 @@ def get_weekly_report(end_date: date):
     player_stats = {}
     player_data = get_all_players(config)
 
+    # Fetch all entries within the puzzle range and group them by player_id
     query_params = f"WHERE puzzle >= {start} and puzzle <= {end}"
     entries = get_entries(config, query_params)
     for entry in entries:
@@ -415,6 +508,8 @@ def get_weekly_report(end_date: date):
     for player, scores in players.items():
         player_stats[player] = {}
 
+        # Track the earliest and latest puzzles so we can capture the
+        # starting and ending ELO/ordinal values for the week
         all_scores = []
         earliest = end + 1
         latest = 0
@@ -428,16 +523,26 @@ def get_weekly_report(end_date: date):
                 player_stats[player]['start_elo'] = round(score['elo'], 3)
                 player_stats[player]['start_ord'] = round(model.rating(mu=score['mu'], sigma=score['sigma']).ordinal(), 5)
                 earliest = score['puzzle']
+        # Compute weekly averages and the net change in ELO/ordinal
         player_stats[player]['average_score'] = round(sum(all_scores) / len(all_scores), 1)
         player_stats[player]['elo_change'] = round(player_stats[player]['end_elo'] - player_stats[player]['start_elo'], 3)
         player_stats[player]['ord_change'] = round(player_stats[player]['end_ord'] - player_stats[player]['start_ord'], 3)
-    
+
+    # Filter out players whose stats are still at the default values
+    # (ordinal=0 and ELO=400 indicate the player has not yet meaningfully played)
+    player_stats = {
+        player: stats
+        for player, stats in player_stats.items()
+        if not (stats.get('end_ord') == 0 and stats.get('end_elo') == 400)
+    }
+
     # sort player_stats by end ordinal
     sorted_keys = sorted(player_stats, key=lambda k: player_stats[k]['end_ord'], reverse=True)
     raw_sorted_player_stats = {}
     for key in sorted_keys:
         raw_sorted_player_stats[key] = player_stats[key]
 
+    # Replace player_id keys with human-readable player names for the final output
     sorted_player_stats = {}
     for k, v in raw_sorted_player_stats.items():
         player_name = match_player_name(player_data, player_id=k)

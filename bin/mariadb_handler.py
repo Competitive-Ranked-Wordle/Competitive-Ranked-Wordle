@@ -215,7 +215,9 @@ def lookup_player(config: dict, player_uuid: str = False, player_id: int = False
         'elo_delta', 
         'ord_delta', 
         'mu_delta', 
-        'sigma_delta' 
+        'sigma_delta',
+        'formula_points',
+        'formula_delta'
     ]
 
     query_string = f"SELECT "
@@ -264,7 +266,9 @@ def get_all_players(config: dict):
         'elo_delta', 
         'ord_delta', 
         'mu_delta', 
-        'sigma_delta' 
+        'sigma_delta',
+        'formula_points',
+        'formula_delta'
     ]
 
     query_string = f"SELECT "
