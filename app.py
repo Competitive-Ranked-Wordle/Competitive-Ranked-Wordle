@@ -6,6 +6,7 @@ Authors: Jivan RamjiSingh
 
 TODO:
     P0:
+        - Add better way to handle API key registration
     P1:
         - Add ELO and OpenSkill decay (pending rate determination)
     P2:
@@ -47,7 +48,7 @@ from pydantic import BaseModel
 from pydantic import BaseModel
 from openskill.models import PlackettLuce
 
-from bin.mariadb_handler import create_wordle_db, update_player_entry, update_score_entry, add_entry, get_entries, lookup_player, register_player, get_all_players, add_formula_history_entry
+from bin.mariadb_handler import MariaDBHandler
 from bin.utilities import parse_score, get_wordle_puzzle, calculate_elo, match_player_name
 
 # ---
@@ -106,7 +107,8 @@ class UserInDB(User):
 
 logging.basicConfig(filename=config['log_file'], level=logging.ERROR, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 app = FastAPI()
-if create_wordle_db(config):
+db = MariaDBHandler(config)
+if db.create_wordle_db():
     pass
 else:
     raise(TypeError("DB Failed to Init Properly"))
@@ -124,7 +126,7 @@ def check_players(start: int, end: int, hard_mode: bool = True):
     else:
         query_params = f"WHERE puzzle >= {start} and puzzle <= {end}"
 
-    entries = get_entries(config, query_params)
+    entries = db.get_entries(query_params)
     if entries == []:
         return False
     else:
@@ -157,20 +159,23 @@ def calculate_formula_one(puzzle: int):
 
     # Pull every entry across the week and group them by player
     query_params = f"WHERE puzzle >= {start_puzzle} and puzzle <= {end_puzzle} and hard_mode = 1"
-    entries = get_entries(config, query_params)
+    entries = db.get_entries(query_params)
 
     player_scores = defaultdict(list)
     for entry in entries:
         player_scores[entry['player_id']].append(entry['calculated_score'])
 
-    # For every player who submitted at least one score this week, compute the
-    # average of their top three calculated_score values. If a player submitted
-    # fewer than three, we average whatever is available (this keeps partial
-    # weeks meaningful while still favouring consistent, high-scoring players).
+    # For every player who submitted at least the configured minimum number of
+    # scores this week, compute the average of their top three calculated_score
+    # values (always divided by 3, so partial weeks are penalised). Players
+    # below the minimum are disqualified from this week's ranking.
+    minimum_scores = config.get('formula', {}).get('minimum_scores', 3)
     player_averages = {}
     for player_id, scores in player_scores.items():
+        if len(scores) < minimum_scores:
+            continue
         top_three = sorted(scores, reverse=True)[:3]
-        player_averages[player_id] = sum(top_three) / len(top_three)
+        player_averages[player_id] = sum(top_three) / 3
 
     # Rank players by highest average first. Ties are handled by grouping players
     # with the same average and awarding them the mean of the point slots they
@@ -213,7 +218,7 @@ def calculate_formula_one(puzzle: int):
 
         for player_id in group:
             # Read the player's current running total so we can add the awarded points
-            player_data = lookup_player(config, player_id=player_id)
+            player_data = db.lookup_player(player_id=player_id)
             current_total = player_data.get('formula_points') or 0
             avg_top_three = player_averages[player_id]
             new_total = current_total + awarded
@@ -229,8 +234,8 @@ def calculate_formula_one(puzzle: int):
                 'formula_points': new_total,
                 'avg_top_three': avg_top_three
             })
-            update_player_entry(config, player_id, players_data)
-            add_formula_history_entry(config, player_id, new_total, awarded, avg_top_three)
+            db.update_player_entry(player_id, players_data)
+            db.add_formula_history_entry(player_id, new_total, awarded, avg_top_three)
             updated_player_ids.add(player_id)
 
         position += group_size
@@ -239,7 +244,7 @@ def calculate_formula_one(puzzle: int):
     # qualifying score this week. This prevents last week's formula_delta and
     # avg_top_three values from lingering on the leaderboard. The running
     # formula_points total is preserved.
-    all_players = get_all_players(config)
+    all_players = db.get_all_players()
     for player_data in all_players:
         player_id = player_data['player_id']
         if player_id in updated_player_ids:
@@ -249,8 +254,8 @@ def calculate_formula_one(puzzle: int):
             'formula_delta': 0,
             'avg_top_three': 0
         }
-        update_player_entry(config, player_id, players_data)
-        add_formula_history_entry(config, player_id, current_total, 0, 0)
+        db.update_player_entry(player_id, players_data)
+        db.add_formula_history_entry(player_id, current_total, 0, 0)
 
     return output
 
@@ -259,11 +264,11 @@ def calculate_openskill(puzzle: int):
     Calculate Openskill rankings for a given day
     """
     query_params = f"WHERE puzzle = {puzzle} AND hard_mode = 1"
-    entries = get_entries(config, query_params)
+    entries = db.get_entries(query_params)
     if len(entries) == 1:
         # Don't do calculations when only one player submits
         for entry in entries:
-            player_data = lookup_player(config, player_id=entry['player_id'])
+            player_data = db.lookup_player(player_id=entry['player_id'])
             score_data = {
                 'mu': player_data['player_mu'],
                 'sigma': player_data['player_sigma'],
@@ -275,8 +280,8 @@ def calculate_openskill(puzzle: int):
                 'mu_delta': 0,
                 'sigma_delta': 0
             }
-            update_score_entry(config, entry['id'], score_data)
-            update_player_entry(config, entry['player_id'], players_data)
+            db.update_score_entry(entry['id'], score_data)
+            db.update_player_entry(entry['player_id'], players_data)
         return False
     
     players = []
@@ -284,7 +289,7 @@ def calculate_openskill(puzzle: int):
     player_stats = {}
 
     for entry in entries:
-        player_data = lookup_player(config, player_id=entry['player_id'])
+        player_data = db.lookup_player(player_id=entry['player_id'])
         players.append([model.rating(name=str(entry['player_id']), mu=player_data['player_mu'], sigma=player_data['player_sigma'])])
         scores.append(entry['calculated_score'])
 
@@ -316,8 +321,8 @@ def calculate_openskill(puzzle: int):
             'sigma_delta': player.sigma - player_stats[entry['player_id']]['sigma']
         }
 
-        update_score_entry(config, entry['id'], score_data)
-        update_player_entry(config, entry['player_id'], players_data)
+        db.update_score_entry(entry['id'], score_data)
+        db.update_player_entry(entry['player_id'], players_data)
         i += 1
 
 def calculate_match_elo(puzzle: int):
@@ -326,11 +331,11 @@ def calculate_match_elo(puzzle: int):
     Translate rankings into 1-1 matches between each player, then sum the elo change
     """
     query_params = f"WHERE puzzle = {puzzle} AND hard_mode = 1"
-    entries = get_entries(config, query_params)
+    entries = db.get_entries(query_params)
     if len(entries) == 1:
         # Don't do calculations when only one player submits
         for entry in entries:
-            player_data = lookup_player(config, player_id=entry['player_id'])
+            player_data = db.lookup_player(player_id=entry['player_id'])
             score_data = {
                 'elo': player_data['player_elo'],
                 'elo_delta': 0,
@@ -338,8 +343,8 @@ def calculate_match_elo(puzzle: int):
             players_data = {
                 'elo_delta': 0
             }
-            update_score_entry(config, entry['id'], score_data)
-            update_player_entry(config, entry['player_id'], players_data)
+            db.update_score_entry(entry['id'], score_data)
+            db.update_player_entry(entry['player_id'], players_data)
 
         return False
     
@@ -352,7 +357,7 @@ def calculate_match_elo(puzzle: int):
 
     current_ratings = {}
     for id in player_ids:
-        player_data = lookup_player(config, player_id=id)
+        player_data = db.lookup_player(player_id=id)
         current_ratings[id] = player_data['player_elo']
 
     for player in entries:
@@ -384,8 +389,8 @@ def calculate_match_elo(puzzle: int):
             'player_elo': current_ratings[player['player_id']] + overall_change,
             'elo_delta': overall_change
         }
-        update_score_entry(config, player['id'], score_data)
-        update_player_entry(config, player['player_id'], players_data)
+        db.update_score_entry(player['id'], score_data)
+        db.update_player_entry(player['player_id'], players_data)
         
 def blame(uuid: str, puzzle: int):
     """
@@ -393,7 +398,7 @@ def blame(uuid: str, puzzle: int):
     Translate rankings into 1-1 matches between each player, then sum the elo change
     """
     query_params = f"WHERE puzzle = {puzzle} AND hard_mode = 1"
-    entries = get_entries(config, query_params)
+    entries = db.get_entries(query_params)
     entries = sorted(entries, key=lambda x: x['calculated_score'], reverse=True)
     
     player_ids = []
@@ -407,7 +412,7 @@ def blame(uuid: str, puzzle: int):
     player_info = {}
     target_id = 0
     for id in player_ids:
-        player_data = lookup_player(config, player_id=id)
+        player_data = db.lookup_player(player_id=id)
         if player_data['player_uuid'] == uuid:
             target_id = player_data['player_id']
         player_info[id] = player_data
@@ -453,13 +458,13 @@ def get_daily_ranks(puzzle: int):
     """
     # Get all player scores for the given puzzle
     query_params = f"WHERE puzzle = {puzzle}"
-    data = get_entries(config, query_params)
+    data = db.get_entries(query_params)
 
     # Add player names to the data
     processed_data = []
     for result in data:
         result['hard_mode'] = 'Y' if result['hard_mode'] == 1 else 'N'
-        player_data = lookup_player(config, player_id=result['player_id'])
+        player_data = db.lookup_player(player_id=result['player_id'])
 
         # Filter out players who have default stats
         if player_data['player_ord'] == 0 and player_data['player_elo'] == 400:
@@ -498,11 +503,11 @@ def get_daily_report(today: date):
     puzzle = get_wordle_puzzle(today - timedelta(days=1))
     players = defaultdict(list)
     player_stats = {}
-    player_data = get_all_players(config)
+    player_data = db.get_all_players()
 
     # Fetch all entries for the target puzzle and group them by player_id
     query_params = f"WHERE puzzle = {puzzle}"
-    entries = get_entries(config, query_params)
+    entries = db.get_entries(query_params)
     for entry in entries:
         players[entry['player_id']].append(entry)
     
@@ -556,11 +561,11 @@ def get_weekly_report(end_date: date):
     start = get_wordle_puzzle(start_date)
     players = defaultdict(list)
     player_stats = {}
-    player_data = get_all_players(config)
+    player_data = db.get_all_players()
 
     # Fetch all entries within the puzzle range and group them by player_id
     query_params = f"WHERE puzzle >= {start} and puzzle <= {end}"
-    entries = get_entries(config, query_params)
+    entries = db.get_entries(query_params)
     for entry in entries:
         players[entry['player_id']].append(entry)
     
@@ -707,7 +712,7 @@ async def login_for_access_token(
 @app.post('/register')
 async def register(player_data: Player, current_user: Annotated[User, Depends(get_current_active_user)]):
     player_data = dict(player_data)
-    data = lookup_player(config, player_uuid=player_data['player_uuid'])
+    data = db.lookup_player(player_uuid=player_data['player_uuid'])
     if data == {}:
         player = model.rating(name='test')
         player_data.update({
@@ -720,7 +725,7 @@ async def register(player_data: Player, current_user: Annotated[User, Depends(ge
             'mu_delta': 0,
             'sigma_delta': 0,
         })
-        register_player(config, player_data)
+        db.register_player(player_data)
         return player_data
     else:
         return {'status': 409}
@@ -728,29 +733,29 @@ async def register(player_data: Player, current_user: Annotated[User, Depends(ge
 
 @app.post('/update-registration')
 async def update_registration(player_data: Player, current_user: Annotated[User, Depends(get_current_active_user)]):
-    players = get_all_players(config)
+    players = db.get_all_players()
     player_data = dict(player_data)
     for player in players:
         if player['player_uuid'] == player_data['player_uuid']:
             data = {
                 'player_name': player_data['player_name']
             }
-            update_player_entry(config, player['player_id'], data)
-            return lookup_player(config, player_uuid=player_data['player_uuid'])
+            db.update_player_entry(player['player_id'], data)
+            return db.lookup_player(player_uuid=player_data['player_uuid'])
 
 @app.post('/add-score/')
 async def add_score(score: Score, current_user: Annotated[User, Depends(get_current_active_user)]):
     """
     Add player score to DB
     """
-    player_data = lookup_player(config, score.uuid)
+    player_data = db.lookup_player(score.uuid)
     if player_data == {}:
         return {
             'status': 404,
             'msg': f"{score.uuid} is not registered for Wordle!"
         }
     data = parse_score(score.score)
-    score_data = get_entries(config, f"WHERE player_id = {player_data['player_id']} AND puzzle = {data['puzzle']}")
+    score_data = db.get_entries(f"WHERE player_id = {player_data['player_id']} AND puzzle = {data['puzzle']}")
     if score_data == []:
         data['player_id'] = player_data['player_id']
         data ['raw_score'] = score.score
@@ -762,7 +767,7 @@ async def add_score(score: Score, current_user: Annotated[User, Depends(get_curr
             data['elo_delta'] = player_data['elo_delta']
             data['ordinal_delta'] = player_data['ord_delta']
         if is_puzzle_valid(data['puzzle']):
-            add_entry(config, data)
+            db.add_entry(data)
             data['player_name'] = player_data['player_name']
             data['status'] = 200
             return data
@@ -812,7 +817,7 @@ async def backfill_scores(backfill_data: BackfillData, current_user: Annotated[U
 
 @app.get('/score/{uuid}')
 async def get_score(uuid, current_user: Annotated[User, Depends(get_current_active_user)], puzzle: int = get_wordle_puzzle(date.today())):
-    player_data = lookup_player(config, uuid)
+    player_data = db.lookup_player(uuid)
 
     if player_data == {}:
         return {
@@ -821,7 +826,7 @@ async def get_score(uuid, current_user: Annotated[User, Depends(get_current_acti
         }
 
     query_params = f"WHERE puzzle = {puzzle} AND player_id = {player_data['player_id']}"
-    score_data = get_entries(config, query_params)
+    score_data = db.get_entries(query_params)
     if score_data == []:
         return {'status': 404, 'msg': f'{player_data['player_name']} did not played today :('}
     else:
@@ -890,13 +895,13 @@ async def calculate_formula_ranking(current_user: Annotated[User, Depends(get_cu
 
 @app.get('/leaderboard')
 async def leaderboard(current_user: Annotated[User, Depends(get_current_active_user)]):
-    player_data = get_all_players(config)
+    player_data = db.get_all_players()
     sorted_player_data = sorted(player_data, key=lambda player: player['player_ord'], reverse=True)
     return sorted_player_data
 
 @app.get('/formula-leaderboard')
 async def formula_leaderboard(current_user: Annotated[User, Depends(get_current_active_user)]):
-    player_data = get_all_players(config)
+    player_data = db.get_all_players()
     # Filter out players who haven't meaningfully played (ordinal still at default 0)
     filtered_player_data = [player for player in player_data if player['player_ord'] != 0]
     # Sort by formula_points (primary), avg_top_three (secondary), player_ord (tertiary)

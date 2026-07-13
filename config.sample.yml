@@ -10,6 +10,8 @@ adaptive_card: "adaptive_card.json"
 elo:
   rating_constant: 400 # These values don't actually change anything in the Script (yet!)
   k_factor: 12
+formula:
+  minimum_scores: 3
 security:
   secret_key: "" # generate with `openssl rand -hex 32`
   algorithm: "HS256"
