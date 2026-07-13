@@ -42,6 +42,11 @@ class MariaDBHandler:
             cur.execute("CREATE TABLE IF NOT EXISTS `players` (`player_name` text NOT NULL, `player_mu` float NOT NULL, `player_sigma` float NOT NULL, `player_ord` float DEFAULT NULL, `elo_delta` double DEFAULT NULL, `ord_delta` double DEFAULT NULL, `mu_delta` double DEFAULT NULL, `sigma_delta` double DEFAULT NULL, `player_id` int(11) NOT NULL AUTO_INCREMENT, `player_platform` text NOT NULL, `player_uuid` text NOT NULL, `player_elo` float NOT NULL DEFAULT 400, `formula_points` float DEFAULT NULL, `formula_delta` float DEFAULT NULL, `avg_top_three` float DEFAULT NULL, PRIMARY KEY (`player_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;")
             cur.execute("CREATE TABLE IF NOT EXISTS `scores` (`id` int(11) NOT NULL AUTO_INCREMENT, `player_id` int(11) DEFAULT NULL, `puzzle` int(11) DEFAULT NULL, `raw_score` text DEFAULT NULL, `score` int(11) DEFAULT NULL, `calculated_score` int(11) DEFAULT NULL, `hard_mode` int(11) DEFAULT NULL, `elo` double DEFAULT NULL, `mu` double DEFAULT NULL, `sigma` double DEFAULT NULL, `ordinal` double DEFAULT NULL, `elo_delta` double DEFAULT NULL, `ordinal_delta` double DEFAULT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;")
             cur.execute("CREATE TABLE IF NOT EXISTS `player_formula_history` (`id` int(11) NOT NULL AUTO_INCREMENT, `player_id` int(11) NOT NULL, `formula_points` float DEFAULT NULL, `formula_delta` float DEFAULT NULL, `avg_top_three` float DEFAULT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;")
+            # Idempotently add new columns to the players table so upgrades from
+            # older images pick up formula-ranking fields without dropping data.
+            cur.execute("ALTER TABLE `players` ADD COLUMN IF NOT EXISTS `formula_points` float DEFAULT NULL;")
+            cur.execute("ALTER TABLE `players` ADD COLUMN IF NOT EXISTS `formula_delta` float DEFAULT NULL;")
+            cur.execute("ALTER TABLE `players` ADD COLUMN IF NOT EXISTS `avg_top_three` float DEFAULT NULL;")
             conn.commit()
             conn.close()
             return True
