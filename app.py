@@ -47,7 +47,7 @@ from pydantic import BaseModel
 from pydantic import BaseModel
 from openskill.models import PlackettLuce
 
-from bin.mariadb_handler import create_wordle_db, update_player_entry, update_score_entry, add_entry, get_entries, lookup_player, register_player, get_all_players
+from bin.mariadb_handler import create_wordle_db, update_player_entry, update_score_entry, add_entry, get_entries, lookup_player, register_player, get_all_players, add_formula_history_entry
 from bin.utilities import parse_score, get_wordle_puzzle, calculate_elo, match_player_name
 
 # ---
@@ -198,8 +198,10 @@ def calculate_formula_one(puzzle: int):
 
     # Award the configured points, splitting evenly across tied players. Persist
     # both the per-week delta (formula_delta) and the running total
-    # (formula_points).
+    # (formula_points), and append a snapshot to player_formula_history to
+    # preserve week-over-week trends.
     position = 0
+    updated_player_ids = set()
     for group in tie_groups:
         group_size = len(group)
         # Sum the points that would be awarded to the slots this group occupies
@@ -213,20 +215,43 @@ def calculate_formula_one(puzzle: int):
             # Read the player's current running total so we can add the awarded points
             player_data = lookup_player(config, player_id=player_id)
             current_total = player_data.get('formula_points') or 0
+            avg_top_three = player_averages[player_id]
+            new_total = current_total + awarded
 
             players_data = {
                 'formula_delta': awarded,
-                'formula_points': current_total + awarded
+                'formula_points': new_total,
+                'avg_top_three': avg_top_three
             }
             output.append({
                 'player_id': player_id,
                 'formula_delta': awarded,
-                'formula_points': current_total + awarded
+                'formula_points': new_total,
+                'avg_top_three': avg_top_three
             })
-            # Database write disabled for testing; uncomment to persist results.
             update_player_entry(config, player_id, players_data)
+            add_formula_history_entry(config, player_id, new_total, awarded, avg_top_three)
+            updated_player_ids.add(player_id)
 
         position += group_size
+
+    # Reset per-week values for any registered player who did NOT submit a
+    # qualifying score this week. This prevents last week's formula_delta and
+    # avg_top_three values from lingering on the leaderboard. The running
+    # formula_points total is preserved.
+    all_players = get_all_players(config)
+    for player_data in all_players:
+        player_id = player_data['player_id']
+        if player_id in updated_player_ids:
+            continue
+        current_total = player_data.get('formula_points') or 0
+        players_data = {
+            'formula_delta': 0,
+            'avg_top_three': 0
+        }
+        update_player_entry(config, player_id, players_data)
+        add_formula_history_entry(config, player_id, current_total, 0, 0)
+
     return output
 
 def calculate_openskill(puzzle: int):
@@ -855,11 +880,33 @@ async def weekly_summary(current_user: Annotated[User, Depends(get_current_activ
 @app.get('/calculate_formula_ranking')
 async def calculate_formula_ranking(current_user: Annotated[User, Depends(get_current_active_user)], puzzle_date: date = date.today()):
     puzzle = get_wordle_puzzle(puzzle_date)
-    data = calculate_formula_one(puzzle)
-    return {'status': 200, 'data': data}
+    # Only run the calculation when there is at least one hard-mode entry in the
+    # week; otherwise there is nothing meaningful to rank.
+    if check_players(puzzle - 6, puzzle, True):
+        data = calculate_formula_one(puzzle)
+        return {'status': 200, 'data': data}
+    else:
+        return {'status': 404, 'msg': 'Nobody played this week :('}
 
 @app.get('/leaderboard')
 async def leaderboard(current_user: Annotated[User, Depends(get_current_active_user)]):
     player_data = get_all_players(config)
     sorted_player_data = sorted(player_data, key=lambda player: player['player_ord'], reverse=True)
+    return sorted_player_data
+
+@app.get('/formula-leaderboard')
+async def formula_leaderboard(current_user: Annotated[User, Depends(get_current_active_user)]):
+    player_data = get_all_players(config)
+    # Filter out players who haven't meaningfully played (ordinal still at default 0)
+    filtered_player_data = [player for player in player_data if player['player_ord'] != 0]
+    # Sort by formula_points (primary), avg_top_three (secondary), player_ord (tertiary)
+    sorted_player_data = sorted(
+        filtered_player_data,
+        key=lambda player: (
+            player.get('formula_points') or 0,
+            player.get('avg_top_three') or 0,
+            player.get('player_ord') or 0,
+        ),
+        reverse=True
+    )
     return sorted_player_data
