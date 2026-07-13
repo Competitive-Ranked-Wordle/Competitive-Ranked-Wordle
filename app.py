@@ -6,6 +6,7 @@ Authors: Jivan RamjiSingh
 
 TODO:
     P0:
+        - Add better way to handle API key registration
     P1:
         - Add ELO and OpenSkill decay (pending rate determination)
     P2:
@@ -164,14 +165,17 @@ def calculate_formula_one(puzzle: int):
     for entry in entries:
         player_scores[entry['player_id']].append(entry['calculated_score'])
 
-    # For every player who submitted at least one score this week, compute the
-    # average of their top three calculated_score values. If a player submitted
-    # fewer than three, we average whatever is available (this keeps partial
-    # weeks meaningful while still favouring consistent, high-scoring players).
+    # For every player who submitted at least the configured minimum number of
+    # scores this week, compute the average of their top three calculated_score
+    # values (always divided by 3, so partial weeks are penalised). Players
+    # below the minimum are disqualified from this week's ranking.
+    minimum_scores = config.get('formula', {}).get('minimum_scores', 3)
     player_averages = {}
     for player_id, scores in player_scores.items():
+        if len(scores) < minimum_scores:
+            continue
         top_three = sorted(scores, reverse=True)[:3]
-        player_averages[player_id] = sum(top_three) / len(top_three)
+        player_averages[player_id] = sum(top_three) / 3
 
     # Rank players by highest average first. Ties are handled by grouping players
     # with the same average and awarding them the mean of the point slots they
