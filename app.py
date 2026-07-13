@@ -146,6 +146,7 @@ def calculate_formula_one(puzzle: int):
     Ninth: 2
     Tenth: 1
     """
+    output = []
     # Points table for the top 10 finishers (index 0 == 1st place)
     points_table = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1]
 
@@ -171,28 +172,62 @@ def calculate_formula_one(puzzle: int):
         top_three = sorted(scores, reverse=True)[:3]
         player_averages[player_id] = sum(top_three) / len(top_three)
 
-    # Rank players by highest average first. Ties are broken by player_id order
-    # (a stable, deterministic tie-break given no other configured criteria).
+    # Rank players by highest average first. Ties are handled by grouping players
+    # with the same average and awarding them the mean of the point slots they
+    # collectively occupy (e.g. a 3-way tie for 1st splits (25+18+15)/3 = 16
+    # points to each of the three tied players).
     ranked_players = sorted(
         player_averages.items(),
         key=lambda item: (-item[1], item[0])
     )
 
-    # Award the configured points to the top 10 finishers, and persist both the
-    # per-week delta (formula_delta) and the running total (formula_points).
-    for position, (player_id, _average) in enumerate(ranked_players):
-        awarded = points_table[position] if position < len(points_table) else 0
+    # Group consecutive players that share the same average into tie buckets
+    tie_groups = []
+    current_group = []
+    current_average = None
+    for player_id, average in ranked_players:
+        if current_average is None or average == current_average:
+            current_group.append(player_id)
+            current_average = average
+        else:
+            tie_groups.append(current_group)
+            current_group = [player_id]
+            current_average = average
+    if current_group:
+        tie_groups.append(current_group)
 
-        # Read the player's current running total so we can add the awarded points
-        player_data = lookup_player(config, player_id=player_id)
-        current_total = player_data.get('formula_points') or 0
+    # Award the configured points, splitting evenly across tied players. Persist
+    # both the per-week delta (formula_delta) and the running total
+    # (formula_points).
+    position = 0
+    for group in tie_groups:
+        group_size = len(group)
+        # Sum the points that would be awarded to the slots this group occupies
+        total_points = sum(
+            points_table[position + offset] if (position + offset) < len(points_table) else 0
+            for offset in range(group_size)
+        )
+        awarded = total_points / group_size
 
-        players_data = {
-            'formula_delta': awarded,
-            'formula_points': current_total + awarded
-        }
-        update_player_entry(config, player_id, players_data)
+        for player_id in group:
+            # Read the player's current running total so we can add the awarded points
+            player_data = lookup_player(config, player_id=player_id)
+            current_total = player_data.get('formula_points') or 0
 
+            players_data = {
+                'formula_delta': awarded,
+                'formula_points': current_total + awarded
+            }
+            output.append({
+                'player_id': player_id,
+                'formula_delta': awarded,
+                'formula_points': current_total + awarded
+            })
+            # Database write disabled for testing; uncomment to persist results.
+            update_player_entry(config, player_id, players_data)
+
+        position += group_size
+    return output
 
 def calculate_openskill(puzzle: int):
     """
@@ -816,6 +851,12 @@ async def weekly_summary(current_user: Annotated[User, Depends(get_current_activ
     else:
         data = {'status': 404, 'msg': 'Nobody played today :('}
     return jsonable_encoder(data)
+
+@app.get('/calculate_formula_ranking')
+async def calculate_formula_ranking(current_user: Annotated[User, Depends(get_current_active_user)], puzzle_date: date = date.today()):
+    puzzle = get_wordle_puzzle(puzzle_date)
+    data = calculate_formula_one(puzzle)
+    return {'status': 200, 'data': data}
 
 @app.get('/leaderboard')
 async def leaderboard(current_user: Annotated[User, Depends(get_current_active_user)]):
