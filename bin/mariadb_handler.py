@@ -34,8 +34,9 @@ def connect_db(config):
 def create_wordle_db(config):
     try:
         conn, cur = connect_db(config)
-        cur.execute("CREATE TABLE IF NOT EXISTS `players` (`player_name` text NOT NULL, `player_mu` float NOT NULL, `player_sigma` float NOT NULL, `player_ord` float DEFAULT NULL, `elo_delta` double DEFAULT NULL, `ord_delta` double DEFAULT NULL, `mu_delta` double DEFAULT NULL, `sigma_delta` double DEFAULT NULL, `player_id` int(11) NOT NULL AUTO_INCREMENT, `player_platform` text NOT NULL, `player_uuid` text NOT NULL, `player_elo` float NOT NULL DEFAULT 400, PRIMARY KEY (`player_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;")
+        cur.execute("CREATE TABLE IF NOT EXISTS `players` (`player_name` text NOT NULL, `player_mu` float NOT NULL, `player_sigma` float NOT NULL, `player_ord` float DEFAULT NULL, `elo_delta` double DEFAULT NULL, `ord_delta` double DEFAULT NULL, `mu_delta` double DEFAULT NULL, `sigma_delta` double DEFAULT NULL, `player_id` int(11) NOT NULL AUTO_INCREMENT, `player_platform` text NOT NULL, `player_uuid` text NOT NULL, `player_elo` float NOT NULL DEFAULT 400, `formula_points` float DEFAULT NULL, `formula_delta` float DEFAULT NULL, `avg_top_three` float DEFAULT NULL, PRIMARY KEY (`player_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;")
         cur.execute("CREATE TABLE IF NOT EXISTS `scores` (`id` int(11) NOT NULL AUTO_INCREMENT, `player_id` int(11) DEFAULT NULL, `puzzle` int(11) DEFAULT NULL, `raw_score` text DEFAULT NULL, `score` int(11) DEFAULT NULL, `calculated_score` int(11) DEFAULT NULL, `hard_mode` int(11) DEFAULT NULL, `elo` double DEFAULT NULL, `mu` double DEFAULT NULL, `sigma` double DEFAULT NULL, `ordinal` double DEFAULT NULL, `elo_delta` double DEFAULT NULL, `ordinal_delta` double DEFAULT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;")
+        cur.execute("CREATE TABLE IF NOT EXISTS `player_formula_history` (`id` int(11) NOT NULL AUTO_INCREMENT, `player_id` int(11) NOT NULL, `formula_points` float DEFAULT NULL, `formula_delta` float DEFAULT NULL, `avg_top_three` float DEFAULT NULL, PRIMARY KEY (`id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;")
         conn.commit()
         conn.close()
         return True
@@ -149,6 +150,22 @@ def register_player(config: dict, player_data: dict):
     conn.commit()
     conn.close()
 
+def add_formula_history_entry(config: dict, player_id: int, formula_points: float, formula_delta: float, avg_top_three: float):
+    """
+    Append a snapshot of a player's formula scoring state to player_formula_history.
+    Called once per player per weekly formula calculation to preserve week-over-week trends.
+    """
+    conn, cur = connect_db(config)
+
+    query_string = (
+        f"INSERT INTO player_formula_history (player_id, formula_points, formula_delta, avg_top_three) "
+        f"VALUES ({player_id}, {formula_points}, {formula_delta}, {avg_top_three})"
+    )
+    cur.execute(query_string)
+
+    conn.commit()
+    conn.close()
+
 def get_entries(config: dict, query_params: str):
     conn, cur = connect_db(config)
     
@@ -215,7 +232,10 @@ def lookup_player(config: dict, player_uuid: str = False, player_id: int = False
         'elo_delta', 
         'ord_delta', 
         'mu_delta', 
-        'sigma_delta' 
+        'sigma_delta',
+        'formula_points',
+        'formula_delta',
+        'avg_top_three'
     ]
 
     query_string = f"SELECT "
@@ -264,7 +284,10 @@ def get_all_players(config: dict):
         'elo_delta', 
         'ord_delta', 
         'mu_delta', 
-        'sigma_delta' 
+        'sigma_delta',
+        'formula_points',
+        'formula_delta',
+        'avg_top_three'
     ]
 
     query_string = f"SELECT "
