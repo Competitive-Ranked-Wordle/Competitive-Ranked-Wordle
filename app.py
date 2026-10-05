@@ -39,6 +39,7 @@ import jwt
 from typing import Annotated
 from collections import defaultdict
 from datetime import date, timedelta, timezone, datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
@@ -67,6 +68,11 @@ SECRET_KEY: str = config['security']['secret_key']
 ALGORITHM: str = config['security']['algorithm']
 ACCESS_TOKEN_EXPIRE_MINUTES: str = config['security']['token_expiration']
 USERS: str = config['security']['users']
+APP_TIMEZONE_NAME: str = os.getenv('APP_TIMEZONE', config.get('timezone', 'UTC'))
+try:
+    APP_TIMEZONE = ZoneInfo(APP_TIMEZONE_NAME)
+except ZoneInfoNotFoundError as exc:
+    raise ValueError(f"Invalid timezone configured: {APP_TIMEZONE_NAME}") from exc
 
 class Score(BaseModel):
     score: str
@@ -131,6 +137,15 @@ def check_players(start: int, end: int, hard_mode: bool = True):
         return False
     else:
         return True
+
+def app_today():
+    """
+    Return today's date in the configured application timezone.
+    """
+    return datetime.now(APP_TIMEZONE).date()
+
+def current_wordle_puzzle():
+    return get_wordle_puzzle(app_today())
 
 def calculate_formula_one(puzzle: int):
     """
@@ -626,7 +641,7 @@ def elo_decay():
     pass
 
 def is_puzzle_valid(puzzle: int):
-    current_puzzle = get_wordle_puzzle(date.today())
+    current_puzzle = current_wordle_puzzle()
     if current_puzzle <= puzzle:
         return True
     else:
@@ -816,7 +831,9 @@ async def backfill_scores(backfill_data: BackfillData, current_user: Annotated[U
     }
 
 @app.get('/score/{uuid}')
-async def get_score(uuid, current_user: Annotated[User, Depends(get_current_active_user)], puzzle: int = get_wordle_puzzle(date.today())):
+async def get_score(uuid, current_user: Annotated[User, Depends(get_current_active_user)], puzzle: int | None = None):
+    if puzzle is None:
+        puzzle = current_wordle_puzzle()
     player_data = db.lookup_player(uuid)
 
     if player_data == {}:
@@ -835,12 +852,16 @@ async def get_score(uuid, current_user: Annotated[User, Depends(get_current_acti
         return score_data
 
 @app.get('/blame/{uuid}')
-async def blame_score(uuid, current_user: Annotated[User, Depends(get_current_active_user)], puzzle: int = get_wordle_puzzle(date.today()) - 1):
+async def blame_score(uuid, current_user: Annotated[User, Depends(get_current_active_user)], puzzle: int | None = None):
+    if puzzle is None:
+        puzzle = current_wordle_puzzle() - 1
     msg = blame(uuid, puzzle)
     return {'msg': msg}
 
 @app.get('/calculate-daily/')
-async def calculate_daily(current_user: Annotated[User, Depends(get_current_active_user)], puzzle_date: date = date.today()):
+async def calculate_daily(current_user: Annotated[User, Depends(get_current_active_user)], puzzle_date: date | None = None):
+    if puzzle_date is None:
+        puzzle_date = app_today()
     puzzle = get_wordle_puzzle(puzzle_date)
     if check_players(puzzle, puzzle, True):
         calculate_openskill(puzzle)
@@ -850,10 +871,12 @@ async def calculate_daily(current_user: Annotated[User, Depends(get_current_acti
     return {'status': 200}
 
 @app.get('/daily-ranks/')
-async def daily_ranks(current_user: Annotated[User, Depends(get_current_active_user)], report_date: date = date.today()):
+async def daily_ranks(current_user: Annotated[User, Depends(get_current_active_user)], report_date: date | None = None):
     """
     Provide a ranking of all players based on their performance (rank only, hard mode independent) in a given puzzle
     """
+    if report_date is None:
+        report_date = app_today()
     puzzle = get_wordle_puzzle(report_date)
     if check_players(puzzle, puzzle, False):
         output = get_daily_ranks(puzzle)
@@ -862,7 +885,9 @@ async def daily_ranks(current_user: Annotated[User, Depends(get_current_active_u
     return output
 
 @app.get('/daily-summary/')
-async def daily_summary(current_user: Annotated[User, Depends(get_current_active_user)], report_date: date = date.today()):
+async def daily_summary(current_user: Annotated[User, Depends(get_current_active_user)], report_date: date | None = None):
+    if report_date is None:
+        report_date = app_today()
     puzzle = get_wordle_puzzle(report_date - timedelta(days=1))
     if check_players(puzzle, puzzle, False):
         data = get_daily_report(report_date)
@@ -871,7 +896,9 @@ async def daily_summary(current_user: Annotated[User, Depends(get_current_active
     return data
 
 @app.get('/weekly-summary/')
-async def weekly_summary(current_user: Annotated[User, Depends(get_current_active_user)], end_date: date = date.today()):
+async def weekly_summary(current_user: Annotated[User, Depends(get_current_active_user)], end_date: date | None = None):
+    if end_date is None:
+        end_date = app_today()
     start_date = end_date - timedelta(days=7)
     end = get_wordle_puzzle(end_date)
     start = get_wordle_puzzle(start_date)
@@ -883,7 +910,9 @@ async def weekly_summary(current_user: Annotated[User, Depends(get_current_activ
     return jsonable_encoder(data)
 
 @app.get('/calculate_formula_ranking')
-async def calculate_formula_ranking(current_user: Annotated[User, Depends(get_current_active_user)], puzzle_date: date = date.today()):
+async def calculate_formula_ranking(current_user: Annotated[User, Depends(get_current_active_user)], puzzle_date: date | None = None):
+    if puzzle_date is None:
+        puzzle_date = app_today()
     puzzle = get_wordle_puzzle(puzzle_date)
     # Only run the calculation when there is at least one hard-mode entry in the
     # week; otherwise there is nothing meaningful to rank.
