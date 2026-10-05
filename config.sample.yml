@@ -7,6 +7,7 @@ mariadb:
   database:
 log_file: "/data/Output/log.log"
 adaptive_card: "adaptive_card.json"
+timezone: "UTC" # IANA timezone name, overridden by APP_TIMEZONE when set
 elo:
   rating_constant: 400 # These values don't actually change anything in the Script (yet!)
   k_factor: 12
